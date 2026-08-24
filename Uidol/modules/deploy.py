@@ -1,12 +1,8 @@
-"""
-Secure userbot deployment flow.
-Phone → OTP → 2FA → encrypted session → start client.
-Session never logged or sent to chat.
-"""
+"""Deploy userbot — access-gated, phone → OTP → 2FA → encrypted session."""
 
 import asyncio
-from pyrogram import filters, Client
-from pyrogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from pyrogram import Client, filters
+from pyrogram.types import Message, CallbackQuery
 from pyrogram.errors import (
     ApiIdInvalid,
     PhoneNumberInvalid,
@@ -19,283 +15,268 @@ from pyrogram.errors import (
     FloodWait,
 )
 
-from Uidol.core.clients.bot import Bot
-from Uidol.core.clients.manager import manager
-from Uidol.core.states.manager import states
-from Uidol.core.handlers.messages import get_message
-from Uidol.core.database import userbots as db_userbots
-from Uidol.core.logger import log, log_event
-from Uidol.utils.helpers import mention
-from Uidol.config.settings import (
+from Uidol import bot, ubot, log
+from Uidol.config import (
     API_ID,
     API_HASH,
     MAX_USERBOTS,
     DEPLOY_TIMEOUT,
-    USERBOT_PREFIX,
     FORCE_JOIN,
+    is_owner,
 )
+from Uidol.core.database import userbots as db_ubot
+from Uidol.core.database import access as db_access
+from Uidol.core.helpers import BTN, MSG
+from Uidol.core.helpers.logger import log_event
+from Uidol.core.helpers.tools import mention
+
+_STATE = {}
 
 
-STATE_PHONE = "deploy_phone"
-STATE_OTP = "deploy_otp"
-STATE_2FA = "deploy_2fa"
+def _set(uid, name, data=None, ttl=DEPLOY_TIMEOUT):
+    _STATE[uid] = {
+        "name": name,
+        "data": data or {},
+        "expires": asyncio.get_event_loop().time() + ttl,
+    }
 
 
-def register(bot: Bot):
-    @bot.on_message(filters.command("deploy") & filters.private)
-    async def deploy_cmd(_, message: Message):
-        user_id = message.from_user.id
-        lang = "id"
-
-        existing = await db_userbots.get_userbot(user_id)
-        if existing and existing.get("is_active"):
-            return await message.reply_text(get_message("deploy_already", lang=lang))
-
-        count = await db_userbots.count_userbots(active_only=True)
-        if count >= MAX_USERBOTS:
-            return await message.reply_text(
-                get_message("deploy_full", lang=lang, max=MAX_USERBOTS)
-            )
-
-        states.set(user_id, STATE_PHONE, ttl=DEPLOY_TIMEOUT)
-        kb = ReplyKeyboardMarkup(
-            [[KeyboardButton("📱 Kirim nomor HP", request_contact=True)]],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-        await message.reply_text(get_message("deploy_start", lang=lang), reply_markup=kb)
-
-    @bot.on_message(filters.command("cancel") & filters.private)
-    async def cancel_cmd(_, message: Message):
-        user_id = message.from_user.id
-        if states.get(user_id):
-            data = states.get(user_id)
-            if data and data.data.get("temp_client"):
-                try:
-                    await data.data["temp_client"].disconnect()
-                except Exception:
-                    pass
-            states.clear(user_id)
-            await message.reply_text(
-                get_message("deploy_cancel", lang="id"),
-                reply_markup=ReplyKeyboardRemove(),
-            )
-
-    @bot.on_message(filters.private & filters.contact)
-    async def on_contact(_, message: Message):
-        user_id = message.from_user.id
-        if not states.is_in(user_id, STATE_PHONE):
-            return
-
-        if not message.contact or message.contact.user_id != user_id:
-            return await message.reply_text(
-                "Gunakan tombol untuk share nomor **akun kamu sendiri**."
-            )
-
-        phone = message.contact.phone_number
-        if not phone.startswith("+"):
-            phone = f"+{phone}"
-
-        status = await message.reply_text(
-            get_message("deploy_processing", lang="id"),
-            reply_markup=ReplyKeyboardRemove(),
-        )
-
-        temp = Client(
-            name=f"deploy_{user_id}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            in_memory=True,
-        )
-
-        try:
-            await temp.connect()
-            sent = await temp.send_code(phone)
-        except (PhoneNumberInvalid, PhoneNumberBanned, PhoneNumberUnoccupied) as e:
-            states.clear(user_id)
-            await status.edit_text(f"❌ Nomor tidak valid / diblokir.\n`{type(e).__name__}`")
-            try:
-                await temp.disconnect()
-            except Exception:
-                pass
-            return
-        except PhoneNumberFlood:
-            states.clear(user_id)
-            await status.edit_text("❌ Terlalu banyak percobaan. Coba lagi nanti.")
-            try:
-                await temp.disconnect()
-            except Exception:
-                pass
-            return
-        except ApiIdInvalid:
-            states.clear(user_id)
-            await status.edit_text("❌ API_ID / API_HASH tidak valid.")
-            try:
-                await temp.disconnect()
-            except Exception:
-                pass
-            return
-        except FloodWait as e:
-            states.clear(user_id)
-            await status.edit_text(f"❌ FloodWait: tunggu {e.value} detik.")
-            try:
-                await temp.disconnect()
-            except Exception:
-                pass
-            return
-        except Exception as e:
-            states.clear(user_id)
-            log.error(f"send_code error: {type(e).__name__}")
-            await status.edit_text(get_message("error_generic", lang="id"))
-            try:
-                await temp.disconnect()
-            except Exception:
-                pass
-            return
-
-        states.set(
-            user_id,
-            STATE_OTP,
-            data={
-                "phone": phone,
-                "phone_code_hash": sent.phone_code_hash,
-                "temp_client": temp,
-            },
-            ttl=DEPLOY_TIMEOUT,
-        )
-        await status.edit_text(get_message("deploy_otp", lang="id"))
-
-    @bot.on_message(filters.private & filters.text & ~filters.command(["cancel", "start", "help", "ping", "deploy"]))
-    async def on_text_during_deploy(_, message: Message):
-        user_id = message.from_user.id
-        state = states.get(user_id)
-        if not state:
-            return
-
-        if state.name == STATE_OTP:
-            await _handle_otp(bot, message, state)
-        elif state.name == STATE_2FA:
-            await _handle_2fa(bot, message, state)
+def _get(uid):
+    s = _STATE.get(uid)
+    if not s:
+        return None
+    if asyncio.get_event_loop().time() > s["expires"]:
+        _STATE.pop(uid, None)
+        return None
+    return s
 
 
-async def _handle_otp(bot: Bot, message: Message, state):
-    user_id = message.from_user.id
-    code_raw = message.text.strip().replace(" ", "")
-    phone = state.data["phone"]
-    phone_code_hash = state.data["phone_code_hash"]
-    temp = state.data["temp_client"]
+def _clear(uid):
+    _STATE.pop(uid, None)
 
-    status = await message.reply_text(get_message("deploy_processing", lang="id"))
 
-    try:
-        await temp.sign_in(phone, phone_code_hash, code_raw)
-    except SessionPasswordNeeded:
-        states.set(
-            user_id,
-            STATE_2FA,
-            data=state.data,
-            ttl=DEPLOY_TIMEOUT,
-        )
-        await status.edit_text(get_message("deploy_2fa", lang="id"))
+@bot.on_callback_query(filters.regex(r"^menu:deploy$"))
+async def cb_deploy(_, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if not is_owner(uid) and not await db_access.has_access(uid):
+        await callback.answer("Tidak ada akses.", show_alert=True)
+        await callback.message.edit_text(MSG.no_access(), reply_markup=BTN.back_home())
         return
-    except (PhoneCodeInvalid, PhoneCodeExpired) as e:
-        await status.edit_text(f"❌ Kode OTP salah / expired.\n`{type(e).__name__}`")
+    existing = await db_ubot.get_ubot(uid)
+    if existing and existing.get("is_active"):
+        await callback.message.edit_text(MSG.already_ubot(), reply_markup=BTN.back_home())
+        await callback.answer()
+        return
+    if await db_ubot.count_ubots(active_only=True) >= MAX_USERBOTS:
+        await callback.message.edit_text(MSG.slots_full(MAX_USERBOTS), reply_markup=BTN.back_home())
+        await callback.answer()
+        return
+    _set(uid, "phone")
+    await callback.message.edit_text(MSG.deploy_phone())
+    await callback.message.reply_text("Tekan tombol di bawah:", reply_markup=BTN.phone_request())
+    await callback.answer()
+
+
+@bot.on_callback_query(filters.regex(r"^menu:status$"))
+async def cb_status(_, callback: CallbackQuery):
+    uid = callback.from_user.id
+    doc = await db_ubot.get_ubot(uid)
+    if not doc:
+        await callback.message.edit_text(MSG.no_ubot(), reply_markup=BTN.back_home())
+        await callback.answer()
+        return
+    online = uid in ubot._ids
+    await callback.message.edit_text(
+        MSG.my_ubot(doc.get("name", "-"), uid, online, doc.get("is_active", False)),
+        reply_markup=BTN.back_home(),
+    )
+    await callback.answer()
+
+
+@bot.on_callback_query(filters.regex(r"^menu:restart_ubot$"))
+async def cb_restart_ubot(_, callback: CallbackQuery):
+    uid = callback.from_user.id
+    doc = await db_ubot.get_ubot(uid)
+    if not doc:
+        await callback.message.edit_text(MSG.no_ubot(), reply_markup=BTN.back_home())
+        await callback.answer()
+        return
+    await callback.answer("Restarting…")
+    for u in list(ubot._ubot):
+        try:
+            if u.me and u.me.id == uid:
+                await u.stop()
+        except Exception:
+            pass
+    session = await db_ubot.get_session(uid)
+    if not session:
+        await callback.message.edit_text(MSG.error(), reply_markup=BTN.back_home())
+        return
+    client = ubot.__class__(session_string=session, name=str(uid))
+    try:
+        await client.start()
+        await callback.message.edit_text(
+            "<blockquote><b>Userbot di-restart</b></blockquote>\n\nClient online lagi.",
+            reply_markup=BTN.back_home(),
+        )
+    except Exception as e:
+        log.error(f"restart ubot: {e}")
+        await callback.message.edit_text(MSG.error(), reply_markup=BTN.back_home())
+
+
+@bot.on_message(filters.command("cancel") & filters.private)
+async def cmd_cancel(_, message: Message):
+    uid = message.from_user.id
+    st = _get(uid)
+    if st and st["data"].get("temp"):
+        try:
+            await st["data"]["temp"].disconnect()
+        except Exception:
+            pass
+    if st:
+        _clear(uid)
+        await message.reply_text(MSG.deploy_cancel(), reply_markup=BTN.remove_kb())
+
+
+@bot.on_message(filters.private & filters.contact)
+async def on_contact(_, message: Message):
+    uid = message.from_user.id
+    st = _get(uid)
+    if not st or st["name"] != "phone":
+        return
+    if not message.contact or message.contact.user_id != uid:
+        await message.reply_text("<blockquote>Pakai nomor <b>akun kamu sendiri</b>.</blockquote>")
+        return
+    phone = message.contact.phone_number
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
+    status = await message.reply_text(MSG.processing(), reply_markup=BTN.remove_kb())
+    temp = Client(name=f"deploy_{uid}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+    try:
+        await temp.connect()
+        sent = await temp.send_code(phone)
+    except (PhoneNumberInvalid, PhoneNumberBanned, PhoneNumberUnoccupied) as e:
+        _clear(uid)
+        await status.edit_text(f"<blockquote><b>Nomor bermasalah</b></blockquote>\n\n<code>{type(e).__name__}</code>")
+        try:
+            await temp.disconnect()
+        except Exception:
+            pass
+        return
+    except PhoneNumberFlood:
+        _clear(uid)
+        await status.edit_text("<blockquote><b>Flood</b></blockquote>\n\nCoba lagi nanti.")
+        try:
+            await temp.disconnect()
+        except Exception:
+            pass
+        return
+    except FloodWait as e:
+        _clear(uid)
+        await status.edit_text(f"<blockquote><b>FloodWait</b></blockquote>\n\nTunggu <code>{e.value}</code> detik.")
+        try:
+            await temp.disconnect()
+        except Exception:
+            pass
         return
     except Exception as e:
-        log.error(f"sign_in error: {type(e).__name__}")
-        await status.edit_text(get_message("error_generic", lang="id"))
+        _clear(uid)
+        log.error(f"send_code: {type(e).__name__}")
+        await status.edit_text(MSG.error())
+        try:
+            await temp.disconnect()
+        except Exception:
+            pass
         return
+    _set(uid, "otp", {"phone": phone, "hash": sent.phone_code_hash, "temp": temp})
+    await status.edit_text(MSG.deploy_otp())
 
-    await _finalize_deploy(bot, message, status, temp, user_id)
+
+@bot.on_message(filters.private & filters.text & ~filters.command(["start", "help", "ping", "cancel"]))
+async def on_deploy_text(_, message: Message):
+    uid = message.from_user.id
+    st = _get(uid)
+    if not st:
+        return
+    if st["name"] == "otp":
+        await _otp(message, st)
+    elif st["name"] == "2fa":
+        await _2fa(message, st)
 
 
-async def _handle_2fa(bot: Bot, message: Message, state):
-    user_id = message.from_user.id
+async def _otp(message: Message, st: dict):
+    uid = message.from_user.id
+    code = message.text.strip().replace(" ", "")
+    temp = st["data"]["temp"]
+    status = await message.reply_text(MSG.processing())
+    try:
+        await temp.sign_in(st["data"]["phone"], st["data"]["hash"], code)
+    except SessionPasswordNeeded:
+        _set(uid, "2fa", st["data"])
+        await status.edit_text(MSG.deploy_2fa())
+        return
+    except (PhoneCodeInvalid, PhoneCodeExpired) as e:
+        await status.edit_text(f"<blockquote><b>OTP salah / expired</b></blockquote>\n\n<code>{type(e).__name__}</code>")
+        return
+    except Exception as e:
+        log.error(f"sign_in: {type(e).__name__}")
+        await status.edit_text(MSG.error())
+        return
+    await _finish(message, status, temp, uid)
+
+
+async def _2fa(message: Message, st: dict):
+    uid = message.from_user.id
     password = message.text.strip()
-    temp = state.data["temp_client"]
-
+    temp = st["data"]["temp"]
     try:
         await message.delete()
     except Exception:
         pass
-
-    status = await message.reply_text(get_message("deploy_processing", lang="id"))
-
+    status = await message.reply_text(MSG.processing())
     try:
         await temp.check_password(password)
-    except Exception as e:
-        log.error(f"2FA error: {type(e).__name__}")
-        await status.edit_text("❌ Password 2FA salah. Coba lagi atau /cancel.")
+    except Exception:
+        await status.edit_text("<blockquote><b>2FA salah</b></blockquote>\n\nCoba lagi atau /cancel.")
         return
+    await _finish(message, status, temp, uid)
 
-    await _finalize_deploy(bot, message, status, temp, user_id)
 
-
-async def _finalize_deploy(bot: Bot, message: Message, status: Message, temp: Client, user_id: int):
+async def _finish(message: Message, status: Message, temp: Client, uid: int):
     try:
         me = await temp.get_me()
-        if me.id != user_id:
+        if me.id != uid:
             await temp.disconnect()
-            states.clear(user_id)
+            _clear(uid)
             await status.edit_text(
-                "❌ Nomor yang dipakai harus milik akun Telegram yang sedang chat dengan bot ini."
+                "<blockquote><b>Nomor tidak cocok</b></blockquote>\n\n"
+                "Pakai nomor akun yang sedang chat dengan bot ini."
             )
             return
-
-        session_string = await temp.export_session_string()
+        plain = await temp.export_session_string()
         await temp.disconnect()
-
-        ok = await db_userbots.add_userbot(
-            user_id=user_id,
-            session_string=session_string,
-            name=me.first_name or str(user_id),
-        )
-        session_string = None
-
-        if not ok:
-            states.clear(user_id)
-            await status.edit_text(get_message("error_generic", lang="id"))
-            return
-
-        ubot = await manager.start_one(user_id)
-        states.clear(user_id)
-
-        if not ubot:
-            await status.edit_text(
-                "Session tersimpan tapi gagal start client. Coba /restartubot nanti."
-            )
-            await log_event(
-                f"⚠️ Deploy partial\nUser: {mention(message.from_user)}\nID: `{user_id}`"
-            )
-            return
-
+        await db_ubot.add_ubot(uid, plain, me.first_name or str(uid))
+        client = ubot.__class__(session_string=plain, name=str(uid))
+        plain = None
+        await client.start()
+        _clear(uid)
         for chat in FORCE_JOIN:
             try:
-                await ubot.join_chat(chat)
+                await client.join_chat(chat)
             except Exception:
                 pass
-
         await status.edit_text(
-            get_message(
-                "deploy_success",
-                lang="id",
-                name=me.first_name,
-                uid=me.id,
-                prefix=USERBOT_PREFIX,
-            )
+            MSG.deploy_ok(me.first_name or "-", me.id),
+            reply_markup=BTN.back_home(),
         )
         await log_event(
-            f"✅ **Userbot deployed**\n"
-            f"User: {mention(message.from_user)}\n"
-            f"ID: `{user_id}`\n"
-            f"Name: {me.first_name}"
+            bot,
+            MSG.log_deploy(mention(message.from_user), uid, me.first_name or "-"),
         )
-        log.info(f"Deploy success for {user_id}")
-
     except Exception as e:
-        states.clear(user_id)
-        log.error(f"finalize deploy error: {type(e).__name__}: {e}")
-        await status.edit_text(get_message("error_generic", lang="id"))
+        _clear(uid)
+        log.error(f"finalize: {e}")
+        await status.edit_text(MSG.error())
         try:
             await temp.disconnect()
         except Exception:
