@@ -1,19 +1,23 @@
 """
-/ping command.
+.ping for userbot clients.
 """
 
 import time
 from pyrogram import filters
 from pyrogram.types import Message
-from Uidol.core.clients.bot import Bot
-from Uidol.core.handlers.messages import get_message
+from Uidol.config.settings import USERBOT_PREFIX
 
 
-def register(bot: Bot):
-    @bot.on_message(filters.command("ping") & filters.private)
-    async def ping_handler(_, message: Message):
+def register(bot):
+    pass
+
+
+def register_userbot(client):
+    prefix = USERBOT_PREFIX
+
+    @client.on_message(filters.me & filters.command("ping", prefixes=prefix))
+    async def ubot_ping(_, message: Message):
         start = time.time()
-        msg = await message.reply_text("...")
+        msg = await message.edit_text("...")
         ms = round((time.time() - start) * 1000, 2)
-        text = get_message("ping", lang="id", ms=ms)
-        await msg.edit_text(text)
+        await msg.edit_text(f"Pong! ⚡ `{ms}ms`")
