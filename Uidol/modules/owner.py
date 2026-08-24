@@ -1,4 +1,4 @@
-"""Owner panel — inline."""
+"""Owner panel — inline + /grant /revoke commands."""
 
 import asyncio
 import os
@@ -22,6 +22,68 @@ _START = time.time()
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _pending_grant = {}
 
+
+async def _do_grant(message: Message, target: int):
+    await db_access.grant(target, by=message.from_user.id)
+    await message.reply_text(MSG.access_granted(target), reply_markup=BTN.owner_panel())
+    try:
+        await bot.send_message(
+            target,
+            "<blockquote><b>Akses deploy diberikan</b></blockquote>\n\n"
+            "Kamu sekarang bisa pasang userbot. Ketik /start.",
+        )
+    except Exception:
+        pass
+    await log_event(
+        bot,
+        f"<blockquote><b>Grant akses</b></blockquote>\n"
+        f"by {mention(message.from_user)}\n"
+        f"→ <code>{target}</code>",
+    )
+
+
+async def _do_revoke(message: Message, target: int):
+    await db_access.revoke(target)
+    await message.reply_text(MSG.access_revoked(target), reply_markup=BTN.owner_panel())
+    await log_event(
+        bot,
+        f"<blockquote><b>Revoke akses</b></blockquote>\n"
+        f"by {mention(message.from_user)}\n"
+        f"→ <code>{target}</code>",
+    )
+
+
+# ─── Commands: /grant <id>  /revoke <id> ─────────────────────────────────────
+
+@bot.on_message(filters.command("grant") & filters.private & filters.user(OWNER_ID))
+async def cmd_grant(_, message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await message.reply_text(
+            "<blockquote><b>Grant akses</b></blockquote>\n\n"
+            "Pakai: <code>/grant user_id</code>\n"
+            "Contoh: <code>/grant 123456789</code>"
+        )
+        return
+    target = int(parts[1].strip())
+    await _do_grant(message, target)
+
+
+@bot.on_message(filters.command("revoke") & filters.private & filters.user(OWNER_ID))
+async def cmd_revoke(_, message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await message.reply_text(
+            "<blockquote><b>Revoke akses</b></blockquote>\n\n"
+            "Pakai: <code>/revoke user_id</code>\n"
+            "Contoh: <code>/revoke 123456789</code>"
+        )
+        return
+    target = int(parts[1].strip())
+    await _do_revoke(message, target)
+
+
+# ─── Inline callbacks ─────────────────────────────────────────────────────────
 
 @bot.on_callback_query(filters.regex(r"^menu:owner$"))
 async def cb_owner_menu(_, callback: CallbackQuery):
@@ -96,6 +158,7 @@ async def cb_grant(_, callback: CallbackQuery):
     await callback.message.edit_text(
         "<blockquote><b>Grant akses</b></blockquote>\n\n"
         "Kirim <b>user ID</b> yang mau dikasih akses deploy.\n"
+        "Atau pakai command: <code>/grant user_id</code>\n\n"
         "/cancel untuk batalkan.",
         reply_markup=BTN.back_home(),
     )
@@ -111,19 +174,20 @@ async def cb_revoke(_, callback: CallbackQuery):
     await callback.message.edit_text(
         "<blockquote><b>Revoke akses</b></blockquote>\n\n"
         "Kirim <b>user ID</b> yang mau dicabut aksesnya.\n"
+        "Atau pakai command: <code>/revoke user_id</code>\n\n"
         "/cancel untuk batalkan.",
         reply_markup=BTN.back_home(),
     )
     await callback.answer()
 
 
-# Exclude commands so this never overlaps with /start, /help, /ping, /cancel.
-# Same group would otherwise swallow those commands for OWNER_ID only.
+# group=1 → jalan setelah deploy text handler (group 0), biar ID input owner tidak di-swallow
 @bot.on_message(
     filters.private
     & filters.text
     & filters.user(OWNER_ID)
-    & ~filters.command(["start", "help", "ping", "cancel"])
+    & ~filters.command(["start", "help", "ping", "cancel", "grant", "revoke"]),
+    group=1,
 )
 async def owner_text_input(_, message: Message):
     action = _pending_grant.get(message.from_user.id)
@@ -137,24 +201,13 @@ async def owner_text_input(_, message: Message):
     _pending_grant.pop(message.from_user.id, None)
 
     if action == "grant":
-        await db_access.grant(target, by=message.from_user.id)
-        await message.reply_text(MSG.access_granted(target), reply_markup=BTN.owner_panel())
-        try:
-            await bot.send_message(
-                target,
-                "<blockquote><b>Akses deploy diberikan</b></blockquote>\n\n"
-                "Kamu sekarang bisa pasang userbot. Ketik /start.",
-            )
-        except Exception:
-            pass
+        await _do_grant(message, target)
     else:
-        await db_access.revoke(target)
-        await message.reply_text(MSG.access_revoked(target), reply_markup=BTN.owner_panel())
+        await _do_revoke(message, target)
 
 
 @bot.on_message(filters.command("cancel") & filters.private & filters.user(OWNER_ID))
 async def owner_cancel_pending(_, message: Message):
-    """Clear pending grant/revoke when owner types /cancel."""
     if message.from_user.id in _pending_grant:
         _pending_grant.pop(message.from_user.id, None)
         await message.reply_text(
