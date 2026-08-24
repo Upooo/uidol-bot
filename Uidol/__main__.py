@@ -1,66 +1,92 @@
-"""
-Uidol entry point.
-Run: python -m Uidol  |  bash start.sh
-"""
+"""Entry: python -m Uidol"""
 
 import asyncio
+import importlib
+import pkgutil
 import signal
-import time
+from pathlib import Path
 
-from Uidol.core.logger import log, bind_bot, log_event
+from Uidol import bot, ubot, log, __version__
+from Uidol.config import MAX_USERBOTS
 from Uidol.core.database.connection import db
-from Uidol.core.clients.bot import Bot
-from Uidol.core.clients.manager import manager
-from Uidol.core.loader.modules import load_modules, get_userbot_register_hook
+from Uidol.core.database import userbots as db_ubot
+from Uidol.core.helpers.logger import log_event
+from Uidol.core.helpers.messages import MSG
 
 
-async def shutdown(bot: Bot):
-    log.info("Shutting down...")
-    await manager.stop_all()
-    await bot.stop()
-    await db.close()
-    log.info("Bye.")
+async def load_modules():
+    package = "Uidol.modules"
+    path = Path(__file__).parent / "modules"
+    loaded = []
+    for info in pkgutil.iter_modules([str(path)]):
+        if info.name.startswith("_"):
+            continue
+        try:
+            importlib.import_module(f"{package}.{info.name}")
+            loaded.append(info.name)
+            log.info(f"Module: {info.name}")
+        except Exception as e:
+            log.error(f"Module {info.name} failed: {e}")
+    return loaded
+
+
+async def start_userbots():
+    records = await db_ubot.get_all_active()
+    count = 0
+    for rec in records:
+        if count >= MAX_USERBOTS:
+            log.warning("MAX_USERBOTS reached")
+            break
+        uid = rec["user_id"]
+        session = await db_ubot.get_session(uid)
+        if not session:
+            continue
+        client = ubot.__class__(session_string=session, name=str(uid))
+        try:
+            me = await asyncio.wait_for(client.start(), timeout=20)
+            if me.id != uid:
+                await client.stop()
+                log.error(f"ID mismatch {uid}")
+                continue
+            count += 1
+        except Exception as e:
+            log.error(f"Start ubot {uid} failed: {e}")
+            await db_ubot.set_active(uid, False)
+    log.info(f"Userbots online: {len(ubot._ubot)}")
 
 
 async def main():
     await db.connect()
-
-    bot = Bot()
     await bot.start()
-    bind_bot(bot)
-
-    # Load bot modules
-    loaded = load_modules(bot)
-    log.info(f"Loaded modules: {loaded}")
-
-    # Userbot modules hook
-    manager.on_userbot_start(get_userbot_register_hook())
-
-    # Start all saved userbots
-    await manager.start_all()
+    await load_modules()
+    await start_userbots()
 
     me = await bot.get_me()
-    await log_event(
-        f"🚀 **Uidol started**\n"
-        f"Bot: @{me.username}\n"
-        f"Userbots online: `{manager.count}`"
-    )
+    await log_event(bot, MSG.log_boot(f"@{me.username}", len(ubot._ubot)))
+    log.info(f"Uidol v{__version__} running")
 
-    stop_event = asyncio.Event()
+    stop = asyncio.Event()
 
-    def _signal_handler():
-        stop_event.set()
+    def _stop():
+        stop.set()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    for s in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _signal_handler)
+            loop.add_signal_handler(s, _stop)
         except NotImplementedError:
             pass
 
-    log.info("Uidol is running. Press Ctrl+C to stop.")
-    await stop_event.wait()
-    await shutdown(bot)
+    await stop.wait()
+
+    for u in list(ubot._ubot):
+        try:
+            await u.stop()
+        except Exception:
+            pass
+    await bot.stop()
+    await db.close()
+    log.info("Stopped")
 
 
 if __name__ == "__main__":
