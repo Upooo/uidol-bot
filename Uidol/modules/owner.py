@@ -181,7 +181,6 @@ async def cb_revoke(_, callback: CallbackQuery):
     await callback.answer()
 
 
-# group=1 → jalan setelah deploy text handler (group 0), biar ID input owner tidak di-swallow
 @bot.on_message(
     filters.private
     & filters.text
@@ -274,12 +273,26 @@ async def cb_restart_yes(_, callback: CallbackQuery):
     if not is_owner(callback.from_user.id):
         await callback.answer("Owner only.", show_alert=True)
         return
-    await callback.message.edit_text("<blockquote><b>Restarting…</b></blockquote>")
+    await callback.answer()
+    try:
+        await callback.message.edit_text("<blockquote><b>Restarting…</b></blockquote>")
+    except Exception:
+        pass
     await log_event(bot, f"<blockquote><b>Restart</b></blockquote>\nby {mention(callback.from_user)}")
-    for u in list(ubot._ubot):
+
+    # Jangan await stop() di dalam handler → deadlock Pyrogram.
+    # Schedule di luar, biar handler selesai dulu.
+    async def _do_restart():
+        await asyncio.sleep(1.5)
+        for u in list(ubot._ubot):
+            try:
+                await asyncio.wait_for(u.stop(), timeout=8)
+            except Exception:
+                pass
         try:
-            await u.stop()
+            await asyncio.wait_for(bot.stop(), timeout=8)
         except Exception:
             pass
-    await bot.stop()
-    os.execv(sys.executable, [sys.executable, "-m", "Uidol"])
+        os.execv(sys.executable, [sys.executable, "-m", "Uidol"])
+
+    asyncio.create_task(_do_restart())

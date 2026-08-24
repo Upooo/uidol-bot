@@ -116,27 +116,57 @@ async def cb_restart_ubot(_, callback: CallbackQuery):
         await callback.message.edit_text(MSG.no_ubot(), reply_markup=BTN.back_home())
         await callback.answer()
         return
+
     await callback.answer("Restarting…")
+    try:
+        await callback.message.edit_text(
+            "<blockquote><b>Restarting userbot…</b></blockquote>",
+        )
+    except Exception:
+        pass
+
+    # Stop existing client (with timeout — avoid hang)
     for u in list(ubot._ubot):
         try:
-            if u.me and u.me.id == uid:
-                await u.stop()
-        except Exception:
-            pass
+            me_id = None
+            try:
+                me_id = u.me.id if u.me else None
+            except Exception:
+                pass
+            if me_id == uid or getattr(u, "name", None) == str(uid):
+                try:
+                    await asyncio.wait_for(u.stop(), timeout=10)
+                except Exception as e:
+                    log.error(f"stop ubot {uid}: {e}")
+                    # Force-remove from lists if stop hung
+                    if u in ubot._ubot:
+                        ubot._ubot.remove(u)
+                    if uid in ubot._ids:
+                        ubot._ids.remove(uid)
+        except Exception as e:
+            log.error(f"restart cleanup: {e}")
+
     session = await db_ubot.get_session(uid)
     if not session:
         await callback.message.edit_text(MSG.error(), reply_markup=BTN.back_home())
         return
+
     client = ubot.__class__(session_string=session, name=str(uid))
     try:
-        await client.start()
+        await asyncio.wait_for(client.start(), timeout=25)
         await callback.message.edit_text(
             "<blockquote><b>Userbot di-restart</b></blockquote>\n\nClient online lagi.",
             reply_markup=BTN.back_home(),
         )
     except Exception as e:
-        log.error(f"restart ubot: {e}")
-        await callback.message.edit_text(MSG.error(), reply_markup=BTN.back_home())
+        log.error(f"restart ubot start: {e}")
+        try:
+            await callback.message.edit_text(
+                f"<blockquote><b>Restart gagal</b></blockquote>\n\n<code>{type(e).__name__}</code>",
+                reply_markup=BTN.back_home(),
+            )
+        except Exception:
+            pass
 
 
 @bot.on_message(filters.command("cancel") & filters.private)
@@ -166,7 +196,6 @@ async def on_contact(_, message: Message):
     if not phone.startswith("+"):
         phone = f"+{phone}"
 
-    # Remove reply keyboard first, then send status (avoids MESSAGE_ID_INVALID on edit)
     status = await message.reply_text(MSG.processing(), reply_markup=BTN.remove_kb())
 
     temp = Client(name=f"deploy_{uid}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
@@ -217,7 +246,11 @@ async def on_contact(_, message: Message):
     await _safe_edit(status, MSG.deploy_otp())
 
 
-@bot.on_message(filters.private & filters.text & ~filters.command(["start", "help", "ping", "cancel", "grant", "revoke"]))
+@bot.on_message(
+    filters.private
+    & filters.text
+    & ~filters.command(["start", "help", "ping", "cancel", "grant", "revoke"])
+)
 async def on_deploy_text(_, message: Message):
     uid = message.from_user.id
     st = _get(uid)
