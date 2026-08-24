@@ -1,25 +1,25 @@
 """
 Uidol Logger
-Safe logging that never leaks sessions or secrets.
+- Safe console logging (never leaks sessions)
+- Optional event logging to Telegram LOG_GROUP
 """
 
 import logging
 import re
 import sys
-from Uidol.config.settings import LOG_LEVEL
+from typing import Optional
+from Uidol.config.settings import LOG_LEVEL, LOG_GROUP_ID
 
 
-# Patterns that must never appear in logs
 SENSITIVE_PATTERNS = [
-    re.compile(r"1[0-9A-Za-z]{50,}"),          # rough session-like strings
-    re.compile(r"BAA[0-9A-Za-z_\-]{20,}"),     # common pyro session prefix
+    re.compile(r"1[0-9A-Za-z]{50,}"),
+    re.compile(r"BAA[0-9A-Za-z_\-]{20,}"),
     re.compile(r"session[_-]?string", re.I),
+    re.compile(r"[0-9]{8,15}:[A-Za-z0-9_-]{30,}"),
 ]
 
 
 class SensitiveFilter(logging.Filter):
-    """Filter out any log record that might contain session data."""
-
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         for pattern in SENSITIVE_PATTERNS:
@@ -45,7 +45,6 @@ def setup_logger(name: str = "Uidol") -> logging.Logger:
         handler.addFilter(SensitiveFilter())
         logger.addHandler(handler)
 
-    # Quiet noisy libraries
     logging.getLogger("pyrogram").setLevel(logging.WARNING)
     logging.getLogger("pyrogram.session").setLevel(logging.WARNING)
     logging.getLogger("pyrogram.connection").setLevel(logging.WARNING)
@@ -56,3 +55,22 @@ def setup_logger(name: str = "Uidol") -> logging.Logger:
 
 
 log = setup_logger()
+_bot_ref = None
+
+
+def bind_bot(bot) -> None:
+    global _bot_ref
+    _bot_ref = bot
+
+
+async def log_event(text: str, disable_preview: bool = True) -> None:
+    if not LOG_GROUP_ID or not _bot_ref:
+        return
+    try:
+        await _bot_ref.send_message(
+            LOG_GROUP_ID,
+            text,
+            disable_web_page_preview=disable_preview,
+        )
+    except Exception as e:
+        log.warning(f"Failed to send log event: {e}")
