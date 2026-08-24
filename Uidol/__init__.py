@@ -1,6 +1,6 @@
 """
 Uidol — Secure Multi-Client Userbot Framework
-v0.0.1
+v1.0.0-Beta
 """
 
 import logging
@@ -18,7 +18,7 @@ from Uidol.config import (
     USERBOT_PREFIX,
 )
 
-__version__ = "0.0.1"
+__version__ = "1.0.0-Beta"
 
 _log = logging.getLogger("Uidol")
 _log.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
