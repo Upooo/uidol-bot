@@ -4,69 +4,64 @@
 
 Version: **0.0.1** (Foundation / Private Development)
 
----
+Built with **Kurigram** + MongoDB. Sessions encrypted at rest. Auto module loader.
 
-## About
+## Features
 
-Uidol is a clean, modular, and security-focused multi-client userbot framework built on **Kurigram**.
+- Management bot + multi userbot clients
+- Secure deploy flow: phone → OTP → 2FA → encrypted session
+- Sessions never logged or written plain to disk (`in_memory`)
+- Auto-load modules (`Uidol/modules/`)
+- Developer commands: `/status`, `/users`, `/ubots`, `/git`, `/restart`
+- Event logs to `LOG_GROUP_ID`
+- Userbot `.ping` out of the box
 
-This version focuses purely on solid foundation:
-- Secure encrypted session storage
-- Auto module loader
-- Multi-client ready
-- Clean architecture
-- Easy to extend
+## Setup
 
-## Features (v0.0.1)
+```bash
+cp .env.example .env
+# fill API_ID, API_HASH, BOT_TOKEN, OWNER_ID, MONGO_URL, ENCRYPTION_KEY, LOG_GROUP_ID
+pip install -r requirements.txt
+bash start.sh
+```
 
-- Management Bot + Multi Userbot support
-- MongoDB backend
-- Sessions encrypted at rest (Fernet)
-- Auto-discover modules (just drop file in `modules/`)
-- Centralized message responses with multi-language foundation
-- Safe logging (never leaks sessions)
-
-## Quick Start
-
-1. Clone / download this repository
-2. Copy environment file:
-   ```bash
-   cp .env.example .env
-   ```
-3. Fill the required values in `.env`
-4. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-5. Run:
-   ```bash
-   bash start.sh
-   # or
-   python -m Uidol
-   ```
-
-## Generate Encryption Key
+Generate encryption key:
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-## Project Structure
+## Commands
 
-See the `Uidol/` package for the modular architecture.
+**User:** `/start` `/help` `/ping` `/deploy` `/myubot` `/restartubot` `/cancel`  
+**Owner/Sudo:** `/status` `/users` `/ubots`  
+**Owner:** `/git status` `/git pull` `/restart`
 
-## Development Status
+Userbot prefix default: `.` → `.ping`
 
-- [x] Core architecture
-- [x] Config system
-- [x] Database layer
-- [x] Security / Session encryption
-- [x] Auto module loader
-- [x] Multi-client manager
-- [x] Basic commands (`/start`, `/ping`, `/help`)
-- [ ] More modules (coming after foundation is stable)
-- [ ] Public Beta (v1.0.0-Beta)
+## Structure
 
----
+```
+Uidol/
+  config/       settings
+  core/
+    clients/    bot, userbot, manager
+    database/   mongo layers
+    security/   encryption, session
+    loader/     auto modules
+    handlers/   messages, errors
+    states/     conversation state
+  modules/      drop files here
+  utils/
+```
 
-**Note**: This is a private development version. Not ready for public use yet.
+## Security notes
+
+- `ENCRYPTION_KEY` must stay on the server only
+- No command exports session strings
+- 2FA password message is deleted when possible
+- Logger filters session-like patterns
+
+## Status
+
+Foundation is the focus of v0.0.1. Client feature modules come later.
