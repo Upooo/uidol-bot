@@ -10,6 +10,13 @@ from pyrogram.errors import (
 
 from Uidol.core.helpers.decorators import PY
 
+try:
+    from pyrogram.enums import ChatMembersFilter
+
+    _ADMIN_FILTER = ChatMembersFilter.ADMINISTRATORS
+except Exception:
+    _ADMIN_FILTER = "administrators"
+
 
 @PY.UBOT("join")
 async def cmd_join(client, message: Message):
@@ -75,12 +82,13 @@ async def cmd_invite(client, message: Message):
 async def cmd_staff(client, message: Message):
     try:
         admins = []
-        async for m in client.get_chat_members(message.chat.id, filter="administrators"):
+        async for m in client.get_chat_members(message.chat.id, filter=_ADMIN_FILTER):
             u = m.user
             if not u:
                 continue
-            tag = "👑" if m.status and str(m.status).endswith("OWNER") or getattr(m, "status", None) and "OWNER" in str(m.status).upper() else "🛡"
-            un = f"@{u.username}" if u.username else u.first_name or str(u.id)
+            status = str(getattr(m, "status", "") or "").upper()
+            tag = "👑" if "OWNER" in status else "🛡"
+            un = f"@{u.username}" if u.username else (u.first_name or str(u.id))
             admins.append(f"{tag} {un} — <code>{u.id}</code>")
         if not admins:
             text = "<blockquote><b>Staff</b></blockquote>\n\nTidak ada."
@@ -89,3 +97,7 @@ async def cmd_staff(client, message: Message):
         await message.edit_text(text)
     except RPCError as e:
         await message.edit_text(f"<blockquote><b>Gagal</b></blockquote>\n\n<code>{e.NAME}</code>")
+    except Exception as e:
+        await message.edit_text(
+            f"<blockquote><b>Gagal</b></blockquote>\n\n<code>{type(e).__name__}</code>"
+        )

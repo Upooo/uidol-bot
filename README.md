@@ -56,4 +56,3 @@ Uidol/
 - Sessions never stored plain in DB
 - Deploy only for verified users (owner grant)
 - `ENCRYPTION_KEY` must be Fernet key — losing it = locked sessions
-"""
