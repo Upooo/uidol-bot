@@ -1,6 +1,6 @@
 """Admin tools — ban, mute, kick, promote, demote, pin."""
 
-from pyrogram.types import Message, ChatPrivileges
+from pyrogram.types import Message, ChatPrivileges, ChatPermissions
 from pyrogram.errors import UserAdminInvalid, ChatAdminRequired, RPCError
 
 from Uidol.core.helpers.decorators import PY
@@ -94,9 +94,7 @@ async def cmd_mute(client, message: Message):
         await client.restrict_chat_member(
             message.chat.id,
             user.id,
-            permissions=client.__class__.RESOLVE_PEER  # placeholder avoided
-            if False
-            else __import__("pyrogram.types", fromlist=["ChatPermissions"]).ChatPermissions(),
+            permissions=ChatPermissions(),
         )
         await message.edit_text(
             f"<blockquote><b>Muted</b></blockquote>\n\n"
@@ -110,8 +108,6 @@ async def cmd_mute(client, message: Message):
 
 @PY.UBOT("unmute")
 async def cmd_unmute(client, message: Message):
-    from pyrogram.types import ChatPermissions
-
     user = await _resolve(client, message)
     if not user:
         return
