@@ -1,6 +1,6 @@
 """
 Userbot / Session database operations.
-All session data is stored encrypted.
+All session data is stored encrypted. Never returned plain except via get_plain_session.
 """
 
 from typing import Optional, List, Dict, Any
@@ -8,7 +8,6 @@ from datetime import datetime
 from Uidol.core.database.connection import db
 from Uidol.core.security.session import protect_session, reveal_session
 from Uidol.core.logger import log
-
 
 COLLECTION = "userbots"
 
@@ -19,10 +18,6 @@ async def add_userbot(
     name: str = "",
     extra: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """
-    Add a new userbot.
-    session_string will be encrypted before saving.
-    """
     encrypted = protect_session(session_string)
 
     doc = {
@@ -32,6 +27,8 @@ async def add_userbot(
         "is_active": True,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
+        "last_start": None,
+        "error_count": 0,
         "extra": extra or {},
     }
 
@@ -49,15 +46,11 @@ async def add_userbot(
 
 
 async def get_userbot(user_id: int) -> Optional[Dict[str, Any]]:
-    """Get userbot data (session remains encrypted)."""
     return await db.db[COLLECTION].find_one({"user_id": user_id})
 
 
 async def get_plain_session(user_id: int) -> Optional[str]:
-    """
-    Get decrypted session string.
-    Use with extreme care – only in memory, never log it.
-    """
+    """Decrypt session in memory only. Do not log or send this value."""
     doc = await get_userbot(user_id)
     if not doc or not doc.get("session"):
         return None
@@ -65,7 +58,6 @@ async def get_plain_session(user_id: int) -> Optional[str]:
 
 
 async def get_all_active_userbots() -> List[Dict[str, Any]]:
-    """Return all active userbots (sessions still encrypted)."""
     cursor = db.db[COLLECTION].find({"is_active": True})
     return await cursor.to_list(length=1000)
 
@@ -86,5 +78,39 @@ async def set_active(user_id: int, active: bool) -> bool:
     return result.modified_count > 0
 
 
-async def count_userbots() -> int:
-    return await db.db[COLLECTION].count_documents({})
+async def mark_started(user_id: int) -> None:
+    await db.db[COLLECTION].update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "last_start": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+                "error_count": 0,
+            }
+        },
+    )
+
+
+async def mark_error(user_id: int) -> None:
+    await db.db[COLLECTION].update_one(
+        {"user_id": user_id},
+        {
+            "$inc": {"error_count": 1},
+            "$set": {"updated_at": datetime.utcnow()},
+        },
+    )
+
+
+async def count_userbots(active_only: bool = False) -> int:
+    query = {"is_active": True} if active_only else {}
+    return await db.db[COLLECTION].count_documents(query)
+
+
+async def list_userbots(limit: int = 100) -> List[Dict[str, Any]]:
+    cursor = (
+        db.db[COLLECTION]
+        .find({}, {"session": 0})
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    return await cursor.to_list(length=limit)
