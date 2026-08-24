@@ -117,14 +117,19 @@ async def cb_revoke(_, callback: CallbackQuery):
     await callback.answer()
 
 
-@bot.on_message(filters.private & filters.text & filters.user(OWNER_ID))
+# Exclude commands so this never overlaps with /start, /help, /ping, /cancel.
+# Same group would otherwise swallow those commands for OWNER_ID only.
+@bot.on_message(
+    filters.private
+    & filters.text
+    & filters.user(OWNER_ID)
+    & ~filters.command(["start", "help", "ping", "cancel"])
+)
 async def owner_text_input(_, message: Message):
     action = _pending_grant.get(message.from_user.id)
     if not action:
         return
     text = message.text.strip()
-    if text.startswith("/"):
-        return
     if not text.isdigit():
         await message.reply_text("<blockquote>Kirim angka user ID saja.</blockquote>")
         return
@@ -145,6 +150,17 @@ async def owner_text_input(_, message: Message):
     else:
         await db_access.revoke(target)
         await message.reply_text(MSG.access_revoked(target), reply_markup=BTN.owner_panel())
+
+
+@bot.on_message(filters.command("cancel") & filters.private & filters.user(OWNER_ID))
+async def owner_cancel_pending(_, message: Message):
+    """Clear pending grant/revoke when owner types /cancel."""
+    if message.from_user.id in _pending_grant:
+        _pending_grant.pop(message.from_user.id, None)
+        await message.reply_text(
+            "<blockquote><b>Dibatalkan</b></blockquote>\n\nGrant/revoke dibatalkan.",
+            reply_markup=BTN.owner_panel(),
+        )
 
 
 @bot.on_callback_query(filters.regex(r"^owner:git_status$"))
