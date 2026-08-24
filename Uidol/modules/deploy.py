@@ -4,7 +4,6 @@ import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.errors import (
-    ApiIdInvalid,
     PhoneNumberInvalid,
     PhoneNumberFlood,
     PhoneNumberBanned,
@@ -13,6 +12,8 @@ from pyrogram.errors import (
     PhoneCodeExpired,
     SessionPasswordNeeded,
     FloodWait,
+    MessageIdInvalid,
+    MessageNotModified,
 )
 
 from Uidol import bot, ubot, log
@@ -53,6 +54,20 @@ def _get(uid):
 
 def _clear(uid):
     _STATE.pop(uid, None)
+
+
+async def _safe_edit(status: Message, text: str, reply_markup=None):
+    """Edit message; fallback to reply if MESSAGE_ID_INVALID (common after keyboard remove)."""
+    try:
+        return await status.edit_text(text, reply_markup=reply_markup)
+    except (MessageIdInvalid, MessageNotModified):
+        return await status.reply_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        log.error(f"safe_edit: {type(e).__name__}: {e}")
+        try:
+            return await status.reply_text(text, reply_markup=reply_markup)
+        except Exception:
+            return status
 
 
 @bot.on_callback_query(filters.regex(r"^menu:deploy$"))
@@ -150,14 +165,20 @@ async def on_contact(_, message: Message):
     phone = message.contact.phone_number
     if not phone.startswith("+"):
         phone = f"+{phone}"
+
+    # Remove reply keyboard first, then send status (avoids MESSAGE_ID_INVALID on edit)
     status = await message.reply_text(MSG.processing(), reply_markup=BTN.remove_kb())
+
     temp = Client(name=f"deploy_{uid}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
     try:
         await temp.connect()
         sent = await temp.send_code(phone)
     except (PhoneNumberInvalid, PhoneNumberBanned, PhoneNumberUnoccupied) as e:
         _clear(uid)
-        await status.edit_text(f"<blockquote><b>Nomor bermasalah</b></blockquote>\n\n<code>{type(e).__name__}</code>")
+        await _safe_edit(
+            status,
+            f"<blockquote><b>Nomor bermasalah</b></blockquote>\n\n<code>{type(e).__name__}</code>",
+        )
         try:
             await temp.disconnect()
         except Exception:
@@ -165,7 +186,7 @@ async def on_contact(_, message: Message):
         return
     except PhoneNumberFlood:
         _clear(uid)
-        await status.edit_text("<blockquote><b>Flood</b></blockquote>\n\nCoba lagi nanti.")
+        await _safe_edit(status, "<blockquote><b>Flood</b></blockquote>\n\nCoba lagi nanti.")
         try:
             await temp.disconnect()
         except Exception:
@@ -173,7 +194,10 @@ async def on_contact(_, message: Message):
         return
     except FloodWait as e:
         _clear(uid)
-        await status.edit_text(f"<blockquote><b>FloodWait</b></blockquote>\n\nTunggu <code>{e.value}</code> detik.")
+        await _safe_edit(
+            status,
+            f"<blockquote><b>FloodWait</b></blockquote>\n\nTunggu <code>{e.value}</code> detik.",
+        )
         try:
             await temp.disconnect()
         except Exception:
@@ -181,18 +205,19 @@ async def on_contact(_, message: Message):
         return
     except Exception as e:
         _clear(uid)
-        log.error(f"send_code: {type(e).__name__}")
-        await status.edit_text(MSG.error())
+        log.error(f"send_code: {type(e).__name__}: {e}")
+        await _safe_edit(status, MSG.error())
         try:
             await temp.disconnect()
         except Exception:
             pass
         return
+
     _set(uid, "otp", {"phone": phone, "hash": sent.phone_code_hash, "temp": temp})
-    await status.edit_text(MSG.deploy_otp())
+    await _safe_edit(status, MSG.deploy_otp())
 
 
-@bot.on_message(filters.private & filters.text & ~filters.command(["start", "help", "ping", "cancel"]))
+@bot.on_message(filters.private & filters.text & ~filters.command(["start", "help", "ping", "cancel", "grant", "revoke"]))
 async def on_deploy_text(_, message: Message):
     uid = message.from_user.id
     st = _get(uid)
@@ -213,14 +238,17 @@ async def _otp(message: Message, st: dict):
         await temp.sign_in(st["data"]["phone"], st["data"]["hash"], code)
     except SessionPasswordNeeded:
         _set(uid, "2fa", st["data"])
-        await status.edit_text(MSG.deploy_2fa())
+        await _safe_edit(status, MSG.deploy_2fa())
         return
     except (PhoneCodeInvalid, PhoneCodeExpired) as e:
-        await status.edit_text(f"<blockquote><b>OTP salah / expired</b></blockquote>\n\n<code>{type(e).__name__}</code>")
+        await _safe_edit(
+            status,
+            f"<blockquote><b>OTP salah / expired</b></blockquote>\n\n<code>{type(e).__name__}</code>",
+        )
         return
     except Exception as e:
-        log.error(f"sign_in: {type(e).__name__}")
-        await status.edit_text(MSG.error())
+        log.error(f"sign_in: {type(e).__name__}: {e}")
+        await _safe_edit(status, MSG.error())
         return
     await _finish(message, status, temp, uid)
 
@@ -237,7 +265,10 @@ async def _2fa(message: Message, st: dict):
     try:
         await temp.check_password(password)
     except Exception:
-        await status.edit_text("<blockquote><b>2FA salah</b></blockquote>\n\nCoba lagi atau /cancel.")
+        await _safe_edit(
+            status,
+            "<blockquote><b>2FA salah</b></blockquote>\n\nCoba lagi atau /cancel.",
+        )
         return
     await _finish(message, status, temp, uid)
 
@@ -248,9 +279,10 @@ async def _finish(message: Message, status: Message, temp: Client, uid: int):
         if me.id != uid:
             await temp.disconnect()
             _clear(uid)
-            await status.edit_text(
+            await _safe_edit(
+                status,
                 "<blockquote><b>Nomor tidak cocok</b></blockquote>\n\n"
-                "Pakai nomor akun yang sedang chat dengan bot ini."
+                "Pakai nomor akun yang sedang chat dengan bot ini.",
             )
             return
         plain = await temp.export_session_string()
@@ -265,7 +297,8 @@ async def _finish(message: Message, status: Message, temp: Client, uid: int):
                 await client.join_chat(chat)
             except Exception:
                 pass
-        await status.edit_text(
+        await _safe_edit(
+            status,
             MSG.deploy_ok(me.first_name or "-", me.id),
             reply_markup=BTN.back_home(),
         )
@@ -276,7 +309,7 @@ async def _finish(message: Message, status: Message, temp: Client, uid: int):
     except Exception as e:
         _clear(uid)
         log.error(f"finalize: {e}")
-        await status.edit_text(MSG.error())
+        await _safe_edit(status, MSG.error())
         try:
             await temp.disconnect()
         except Exception:
